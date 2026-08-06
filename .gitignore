@@ -1,0 +1,24 @@
+# Mac files
+.DS_Store
+
+# Arduino / embedded build outputs
+build/
+.cache/
+*.hex
+*.elf
+*.bin
+*.uf2
+*.eep
+*.map
+*.lst
+*.lss
+*.sym
+
+# Generated temp files
+*.tmp
+*.bak
+*.swp
+*.swo
+
+# Code editor
+.vscode/
