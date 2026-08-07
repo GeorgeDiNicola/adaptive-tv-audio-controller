@@ -7,8 +7,8 @@ flowchart LR
     subgraph Arduino["Arduino Uno"]
         V5["5V"]
         GND["GND"]
-        A0["A0<br/>sound sensor input"]
-        D3["D3<br/>IR transmitter output"]
+        A0["A0 / sound sensor input"]
+        D3["D3 / IR transmitter output"]
     end
 
     subgraph Breadboard["Breadboard power rails"]
@@ -17,16 +17,16 @@ flowchart LR
     end
 
     subgraph SoundSensor["Sound sensor module"]
-        SP["+<br/>Power"]
-        SG["G<br/>Ground"]
-        AO["AO<br/>Analog output"]
-        DO["DO<br/>Digital output<br/>unused"]
+        SP["+ / Power"]
+        SG["G / Ground"]
+        AO["AO / Analog output"]
+        DO["DO / Digital output unused"]
     end
 
     subgraph IRTransmitter["IR transmitter module"]
-        IRP["+<br/>Power"]
-        IRN["-<br/>Ground"]
-        IRS["S<br/>Signal"]
+        IRP["+ / Power"]
+        IRN["- / Ground"]
+        IRS["S / Signal"]
     end
 
     V5 -- "5V power" --> POS
@@ -70,4 +70,3 @@ flowchart LR
 - Point the IR transmitter LED at the TV's IR receiver.
 - Put the sound sensor near the listening position or near the TV, depending on what level you want it to react to.
 - Do not place the sound sensor directly against the TV speaker.
-
