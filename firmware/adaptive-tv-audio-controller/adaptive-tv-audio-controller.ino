@@ -3,7 +3,7 @@
 #define DISABLE_CODE_FOR_RECEIVER
 
 // Comment out this one line for battery operation.
-// #define ENABLE_SERIAL_CONFIGURATION
+#define ENABLE_SERIAL_CONFIGURATION
 
 #include <IRremote.hpp>
 
