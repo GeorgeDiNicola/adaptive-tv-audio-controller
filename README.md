@@ -1,6 +1,6 @@
 # Automatic TV Audio Level Controller
 An Arduino-based prototype that automatically adjusts TV volume using
-sound-level detection and IR remote signals.
+sound-level detection and infrared remote signals.
 
 ## Materials
 - Arduino Uno
@@ -62,23 +62,52 @@ flowchart LR
 
 The sound sensor is read through its analog output (`AO`) on Arduino pin
 `A0`. The sketch samples the sensor over short 250 ms windows and
-calculates a Root Mean Square sound level from those samples.
+calculates how much the sensor readings vary during each window.
 
-**Root Mean Square level (RMS)** estimates the overall strength of the
-changing sound signal during the sample window. This is the main value used
-for automatic volume adjustment because it represents sustained loudness
-better than a single momentary spike. The code normalizes this value to a
-`0.00` through `1.00` scale before comparing it to the too-loud threshold.
+The main measurement is the standard deviation of the sensor readings. That
+works well for this project because the microphone signal sits around a
+baseline voltage, then moves above and below that baseline when sound is
+present. A louder sound generally makes the readings move farther from the
+average baseline.
 
-The sketch also smooths the RMS level over time. Each new measurement only
-moves the smoothed value part of the way toward the latest reading. This
-keeps the controller from reacting too aggressively to one noisy sample
-window, while still allowing it to respond when the TV stays loud for
-multiple windows.
+For each 250 ms sample window:
 
-RMS with smoothing was chosen for the control decision because TV volume
-should only be reduced when the sound stays loud, not when the sensor
-catches one brief period of loud sound.
+```text
+average = sum(readings) / number_of_readings
+
+variance = sum((reading - average)^2) / number_of_readings
+
+standardDeviation = sqrt(variance)
+
+standardDeviationLevel = standardDeviation / 1023.0
+```
+
+`1023.0` is the largest possible analog reading on the Arduino Uno, so
+the last step normalizes the standard deviation to a `0.00` through `1.00`
+scale.
+
+The sketch also smooths the normalized standard deviation over time. Each
+new measurement only moves the smoothed value part of the way toward the
+latest reading. This keeps the controller from reacting too aggressively to
+one noisy sample window, while still allowing it to respond when the TV stays
+loud for multiple windows.
+
+The smoothing calculation is:
+
+```text
+smoothedLevel =
+  (0.10 * standardDeviationLevel) +
+  (0.90 * previousSmoothedLevel)
+```
+
+The threshold is applied to `smoothedLevel`, not to one raw sample window.
+When `smoothedLevel` stays above the too-loud threshold for 8 windows, the
+Arduino sends the TV's volume-down command. With 250 ms windows, that means
+the sound must remain loud for about 2 seconds before the volume changes.
+
+Standard deviation with smoothing was chosen for the control decision
+because TV volume should only be reduced when the sound stays loud, not when
+the sensor catches one brief period of loud sound.
 
 ## Standalone Battery Mode
 
