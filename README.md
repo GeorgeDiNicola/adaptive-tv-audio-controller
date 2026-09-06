@@ -8,7 +8,7 @@ sound-level detection and infrared remote signals.
 - Sound sensor module
 - Jumper wires
 - Breadboard
-- A device for detecting IR signal codes (ex: Flipper Zero)
+- Optional: A device for detecting IR signal codes (ex: Flipper Zero)
 
 ## Wiring Diagram
 See [docs/wiring.md](docs/wiring.md) for the full wiring diagram.
@@ -57,70 +57,54 @@ flowchart LR
 - Hex code address for TV remote: `0x01`
 - Hex code for `Volume Down` on TV remote
 - Too-loud threshold for automatic adjustment
+- Fast safety threshold for immediate adjustment
 
 ## Sound Level Measurement
 
-The sound sensor is read through its analog output (`AO`) on Arduino pin
-`A0`. The sketch samples the sensor over short 250 ms windows and
-calculates how much the sensor readings vary during each window.
+The sensor's analog output (`AO`) is sampled through Arduino pin `A0` in
+250 ms windows. For each window, the sketch calculates the standard deviation:
+how much the readings moved above and below their average. It divides that
+result by the Arduino Uno's maximum ADC reading of `1023` to produce
+`normalizedLevel`. This is a relative sensor level, not a decibel measurement.
 
-The main measurement is the standard deviation of the sensor readings. That
-works well for this project because the microphone signal sits around a
-baseline voltage, then moves above and below that baseline when sound is
-present. A louder sound generally makes the readings move farther from the
-average baseline.
+Both control rules use this standard-deviation-based level:
 
-For each 250 ms sample window:
+- **Sustained loudness:** averages the last 12 levels, representing 3 seconds
+  of sound. If that rolling average exceeds `0.001`, it sends 2 volume-down
+  commands.
+- **Fast safety:** checks only the current 250 ms level. If it exceeds `0.0015`,
+  it immediately sends 5 volume-down commands.
 
-```text
-average = sum(readings) / number_of_readings
+The raw average sensor reading is only used to calculate standard deviation;
+it does not control the TV volume directly. If both rules trigger together,
+the sustained-loudness rule takes priority. After any adjustment, the history
+is cleared and the controller waits 2 seconds before adjusting again.
 
-variance = sum((reading - average)^2) / number_of_readings
+In simple terms, the controller measures how much the microphone signal is
+moving. It reacts strongly to one sudden spike, or more gently when that
+movement remains high for several seconds. The per-window calculation uses
+[Welford's method](https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Welford's_online_algorithm), which keeps
+an updated average and variation as each sensor reading arrives.
 
-standardDeviation = sqrt(variance)
+The Serial Monitor reports:
 
-standardDeviationLevel = standardDeviation / 1023.0
-```
-
-`1023.0` is the largest possible analog reading on the Arduino Uno, so
-the last step normalizes the standard deviation to a `0.00` through `1.00`
-scale.
-
-The sketch also smooths the normalized standard deviation over time. Each
-new measurement only moves the smoothed value part of the way toward the
-latest reading. This keeps the controller from reacting too aggressively to
-one noisy sample window, while still allowing it to respond when the TV stays
-loud for multiple windows.
-
-The smoothing calculation is:
-
-```text
-smoothedLevel =
-  (0.10 * standardDeviationLevel) +
-  (0.90 * previousSmoothedLevel)
-```
-
-The threshold is applied to `smoothedLevel`, not to one raw sample window.
-When `smoothedLevel` stays above the too-loud threshold for 8 windows, the
-Arduino sends the TV's volume-down command. With 250 ms windows, that means
-the sound must remain loud for about 2 seconds before the volume changes.
-
-Standard deviation with smoothing was chosen for the control decision
-because TV volume should only be reduced when the sound stays loud, not when
-the sensor catches one brief period of loud sound.
+- `normalizedLevel`: standard deviation divided by `1023.0`
+- `rollingAverage`: average of the latest normalized levels
+- `samples`: number of analog readings collected
+- `action`: whether the controller sent a volume-down command
 
 ## Standalone Battery Mode
 
-Before running the Arduino from battery power, upload the sketch with Serial
-prompts disabled:
+Serial configuration prompts are enabled by default. Before uploading a build
+that will run on battery power, comment out this line near the top of the
+Arduino sketch:
 
 ```cpp
-// #define ENABLE_SERIAL_CONFIGURATION
+#define ENABLE_SERIAL_CONFIGURATION
 ```
 
-If `ENABLE_SERIAL_CONFIGURATION` is still enabled, the Arduino can wait for
-Serial Monitor input & appear to do nothing when it is not connected to your
-computer.
+The sketch has the same instruction immediately above that line. Uncomment the
+line again when you want to configure the controller through Serial Monitor.
 
 ## Troubleshooting
 - **Sound readings do not change**: confirm `AO` is connected to `A0`.

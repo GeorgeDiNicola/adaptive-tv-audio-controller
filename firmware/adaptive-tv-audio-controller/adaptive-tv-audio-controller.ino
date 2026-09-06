@@ -2,7 +2,7 @@
 
 #define DISABLE_CODE_FOR_RECEIVER
 
-// Comment out this one line for battery operation.
+// Comment out the next line before uploading for battery power
 #define ENABLE_SERIAL_CONFIGURATION
 
 #include <IRremote.hpp>
@@ -14,14 +14,22 @@ struct TvIrConfig {
 };
 
 struct SoundMeasurement {
+  unsigned long sampleCount;
+  float averageReading;
+  uint16_t minimumReading;
+  uint16_t maximumReading;
+  float standardDeviationReading;
   float standardDeviationLevel;
-  float smoothedLevel;
+  float rollingAverageLevel;
 };
 
-const float kDefaultTooLoudThreshold = 0.32;
-// Eight 250 ms windows equals 2 seconds.
-const uint8_t kLoudWindowsRequired = 8;
+const float kDefaultTooLoudThreshold = 0.001;
+const float kDefaultFastSafetyThreshold = 0.0015;
+const float kMaximumThreshold = 0.49;
+// Twelve 250 ms windows equals 3 seconds of recent sound history
+const uint8_t kRollingWindowCount = 12;
 const uint8_t kNotchesPerAdjustment = 2;
+const uint8_t kFastSafetyNotches = 5;
 const unsigned long kDelayBetweenCommandsMs = 150;
 
 const uint8_t kIrSendPin = 3;
@@ -30,8 +38,8 @@ const uint8_t kSoundPin = A0;
 const float kMaxAnalogReading = 1023.0;
 
 const unsigned long kSampleWindowMs = 250;
-const float kSmoothingFactor = 0.10;
-const unsigned long kAdjustmentCooldownMs = 1500;
+// 2 seconds
+const unsigned long kAdjustmentCooldownMs = 2000;
 const int_fast8_t kIrRepeats = 0;
 
 const TvIrConfig kDefaultConfig = {
@@ -42,13 +50,15 @@ const TvIrConfig kDefaultConfig = {
 
 TvIrConfig tvConfig = kDefaultConfig;
 
-float smoothedLevel = 0.0;
 float tooLoudThreshold = kDefaultTooLoudThreshold;
+float fastSafetyThreshold = kDefaultFastSafetyThreshold;
+float recentLevels[kRollingWindowCount] = {};
+float recentLevelTotal = 0.0;
 
-bool hasSmoothedLevel = false;
-bool automationEnabled = true;
+bool hasAdjustedVolume = false;
 
-uint8_t loudWindowCount = 0;
+uint8_t recentLevelCount = 0;
+uint8_t nextRecentLevelIndex = 0;
 unsigned long lastAdjustmentAt = 0;
 
 String readSerialLine() {
@@ -164,7 +174,7 @@ float readNormalizedLevel(const __FlashStringHelper *prompt) {
     Serial.println(prompt);
 
     Serial.println(
-      F("Enter a decimal from 0.01 through 1.00.")
+      F("Enter a decimal greater than 0.000000 through 0.49.")
     );
 
     String value =
@@ -175,13 +185,13 @@ float readNormalizedLevel(const __FlashStringHelper *prompt) {
 
     if (
       parsedValue > 0.0 &&
-      parsedValue <= 1.0
+      parsedValue <= kMaximumThreshold
     ) {
       return parsedValue;
     }
 
     Serial.println(
-      F("The threshold must be > 0.00 and <= 1.00.")
+      F("The threshold must be > 0.00 and <= 0.49.")
     );
   }
 }
@@ -353,10 +363,19 @@ void printSoundThreshold() {
   Serial.println();
 
   Serial.print(
-    F("Too-loud threshold: ")
+    F("Too loud threshold: ")
   );
 
-  Serial.println(tooLoudThreshold, 3);
+  Serial.println(tooLoudThreshold, 6);
+
+  Serial.print(
+    F("Fast safety threshold: ")
+  );
+
+  Serial.println(
+    fastSafetyThreshold,
+    6
+  );
 
   Serial.println();
 }
@@ -366,8 +385,13 @@ void configureSoundThresholdFromSerial() {
     F("Use the default too-loud threshold?")
   );
 
+  Serial.print(
+    F("Default: ")
+  );
+
   Serial.println(
-    F("Default: 0.32")
+    kDefaultTooLoudThreshold,
+    6
   );
 
   Serial.println(
@@ -398,8 +422,55 @@ void configureSoundThresholdFromSerial() {
       readNormalizedLevel(
         F(
           "Too-loud threshold: volume goes "
-          "down after the level remains above "
-          "this value for 2 seconds."
+          "down when the 3-second average "
+          "exceeds this value."
+        )
+      );
+  }
+
+  Serial.println(
+    F("Use the default fast safety threshold?")
+  );
+
+  Serial.print(
+    F("Default: ")
+  );
+
+  Serial.println(
+    kDefaultFastSafetyThreshold,
+    6
+  );
+
+  Serial.println(
+    F(
+      "Type Y/YES for the default or "
+      "N/NO for a custom value."
+    )
+  );
+
+  useDefault = readRequiredSerialLine();
+
+  while (
+    !isYes(useDefault) &&
+    !isNo(useDefault)
+  ) {
+    Serial.println(
+      F("Please type Y/YES or N/NO.")
+    );
+
+    useDefault =
+      readRequiredSerialLine();
+  }
+
+  if (isYes(useDefault)) {
+    fastSafetyThreshold = kDefaultFastSafetyThreshold;
+  } else {
+    fastSafetyThreshold =
+      readNormalizedLevel(
+        F(
+          "Fast safety threshold: volume goes "
+          "down immediately when one sound "
+          "measurement exceeds this value."
         )
       );
   }
@@ -408,18 +479,6 @@ void configureSoundThresholdFromSerial() {
 }
 
 void sendTvCommand(uint16_t command) {
-  Serial.print(
-    F("Sending command 0x")
-  );
-
-  Serial.print(command, HEX);
-
-  Serial.print(
-    F(" with repeats=")
-  );
-
-  Serial.println(kIrRepeats);
-
   size_t sent = IrSender.write(
     tvConfig.protocol,
     tvConfig.address,
@@ -437,119 +496,140 @@ void sendTvCommand(uint16_t command) {
   }
 }
 
-void sendVolumeDown() {
-  Serial.print(
-    F("Volume-down notches: ")
-  );
-
-  Serial.println(
-    kNotchesPerAdjustment
-  );
-
-  for (uint8_t notch = 0; notch < kNotchesPerAdjustment; notch++) {
+void sendVolumeDown(uint8_t notchCount) {
+  for (uint8_t notch = 0; notch < notchCount; notch++) {
     sendTvCommand(
       tvConfig.volumeDownCommand
     );
 
-    if (notch + 1 < kNotchesPerAdjustment) {
+    if (notch + 1 < notchCount) {
       delay(kDelayBetweenCommandsMs);
     }
   }
 }
 
+void resetRecentLevels() {
+  recentLevelTotal = 0.0;
+  recentLevelCount = 0;
+  nextRecentLevelIndex = 0;
+
+  for (uint8_t index = 0; index < kRollingWindowCount; index++) {
+    recentLevels[index] = 0.0;
+  }
+}
+
+float addToRollingAverage(float level) {
+  if (recentLevelCount == kRollingWindowCount) {
+    recentLevelTotal -= recentLevels[nextRecentLevelIndex];
+  } else {
+    recentLevelCount++;
+  }
+
+  recentLevels[nextRecentLevelIndex] = level;
+  recentLevelTotal += level;
+
+  nextRecentLevelIndex =
+    (nextRecentLevelIndex + 1) % kRollingWindowCount;
+
+  return recentLevelTotal / recentLevelCount;
+}
+
 SoundMeasurement measureSound() {
   unsigned long sampleCount = 0;
 
-  float total = 0.0;
-  float totalSquared = 0.0;
+  float averageReading = 0.0;
+  float squaredDifferenceTotal = 0.0;
+
+  uint16_t minimumReading = 1023;
+  uint16_t maximumReading = 0;
 
   unsigned long startTime = millis();
 
   while (millis() - startTime < kSampleWindowMs) {
-    int sample = analogRead(kSoundPin);
+    uint16_t sample = analogRead(kSoundPin);
 
-    total += sample;
-    totalSquared += static_cast<float>(sample) * sample;
     sampleCount++;
+
+    float differenceFromPreviousAverage =
+      sample - averageReading;
+
+    averageReading +=
+      differenceFromPreviousAverage / sampleCount;
+
+    float differenceFromNewAverage =
+      sample - averageReading;
+
+    // Welford's method avoids losing small variations beside a large average
+    squaredDifferenceTotal +=
+      differenceFromPreviousAverage * differenceFromNewAverage;
+
+    if (sample < minimumReading) {
+      minimumReading = sample;
+    }
+
+    if (sample > maximumReading) {
+      maximumReading = sample;
+    }
   }
 
-  float average = total / sampleCount;
+  float variance = squaredDifferenceTotal / sampleCount;
 
-  float variance = (totalSquared / sampleCount) - (average * average);
-
-  if (variance < 0.0) {
-    variance = 0.0;
-  }
-
-  float standardDeviation = sqrt(variance);
+  float standardDeviationReading = sqrt(variance);
 
   float standardDeviationLevel =
-    standardDeviation / kMaxAnalogReading;
+    standardDeviationReading / kMaxAnalogReading;
 
-  if (!hasSmoothedLevel) {
-    smoothedLevel = standardDeviationLevel;
-    hasSmoothedLevel = true;
-  } else {
-    smoothedLevel =
-      (
-        kSmoothingFactor *
-        standardDeviationLevel
-      ) +
-      (
-        (1.0 - kSmoothingFactor) *
-        smoothedLevel
-      );
-  }
+  float rollingAverageLevel =
+    addToRollingAverage(standardDeviationLevel);
 
   return {
+    sampleCount,
+    averageReading,
+    minimumReading,
+    maximumReading,
+    standardDeviationReading,
     standardDeviationLevel,
-    smoothedLevel
+    rollingAverageLevel
   };
 }
 
 bool cooldownHasElapsed() {
   return (
+    !hasAdjustedVolume ||
     millis() - lastAdjustmentAt >=
     kAdjustmentCooldownMs
   );
 }
 
-void updateAutomaticControl(float level) {
+void updateAutomaticControl(const SoundMeasurement &measurement) {
+  bool fastSafetyTriggered =
+    measurement.standardDeviationLevel >
+    fastSafetyThreshold;
+
+  bool rollingWindowIsFull =
+    recentLevelCount == kRollingWindowCount;
+
+  bool sustainedLoudnessDetected =
+    rollingWindowIsFull &&
+    measurement.rollingAverageLevel > tooLoudThreshold;
+
   bool sentVolumeDown = false;
 
-  if (level > tooLoudThreshold) {
-    if (loudWindowCount < kLoudWindowsRequired) {
-      loudWindowCount++;
-    }
-  } else {
-    loudWindowCount = 0;
-  }
-
-  if (loudWindowCount >= kLoudWindowsRequired &&
-    cooldownHasElapsed()
+  if (
+    cooldownHasElapsed() &&
+    (fastSafetyTriggered || sustainedLoudnessDetected)
   ) {
-    sendVolumeDown();
+    uint8_t notchCount = sustainedLoudnessDetected
+      ? kNotchesPerAdjustment
+      : kFastSafetyNotches;
 
-    hasSmoothedLevel = false;
+    sendVolumeDown(notchCount);
+
+    resetRecentLevels();
     lastAdjustmentAt = millis();
+    hasAdjustedVolume = true;
     sentVolumeDown = true;
   }
-
-  Serial.print(F(" state="));
-
-  Serial.print(
-    level > tooLoudThreshold
-      ? F("LOUD")
-      : F("OK")
-  );
-
-  Serial.print(
-    F(" loudCount=")
-  );
-
-  Serial.print(
-    loudWindowCount
-  );
 
   Serial.print(
     F(" action=")
@@ -557,17 +637,17 @@ void updateAutomaticControl(float level) {
 
   Serial.println(
     sentVolumeDown
-      ? F("VOLUME_DOWN")
+      ? (
+        sustainedLoudnessDetected
+          ? F("VOLUME_DOWN")
+          : F("FAST_VOLUME_DOWN")
+      )
       : F("none")
   );
 }
 
 void printHelp() {
   Serial.println(F("Commands:"));
-
-  Serial.println(
-    F("  a = toggle automatic adjustment")
-  );
 
   Serial.println(
     F("  t = change the too-loud threshold")
@@ -587,30 +667,10 @@ void handleSerialCommand() {
 
   char input = Serial.read();
 
-  if (input == 'a' || input == 'A') {
-    automationEnabled = !automationEnabled;
-
-    loudWindowCount = 0;
-
-    Serial.print(
-      F("Automatic adjustment: ")
-    );
-
-    Serial.println(
-      automationEnabled
-        ? F("ON")
-        : F("OFF")
-    );
-  } else if (input == 't' || input == 'T') {
-    bool wasEnabled =
-      automationEnabled;
-
-    automationEnabled = false;
-    loudWindowCount = 0;
+  if (input == 't' || input == 'T') {
+    resetRecentLevels();
 
     configureSoundThresholdFromSerial();
-
-    automationEnabled = wasEnabled;
   } else if (input == 'h' || input == 'H') {
     printHelp();
   }
@@ -659,6 +719,7 @@ void setup() {
 #else
   tvConfig = kDefaultConfig;
   tooLoudThreshold = kDefaultTooLoudThreshold;
+  fastSafetyThreshold = kDefaultFastSafetyThreshold;
 
   printConfig();
   printSoundThreshold();
@@ -672,20 +733,14 @@ void loop() {
 
   SoundMeasurement measurement = measureSound();
 
-  Serial.print(F("level="));
-  Serial.print(measurement.smoothedLevel, 3);
+  Serial.print(F("normalizedLevel="));
+  Serial.print(measurement.standardDeviationLevel, 6);
 
-  Serial.print(F(" standardDeviation="));
-  Serial.print(measurement.standardDeviationLevel, 3);
+  Serial.print(F(" rollingAverage="));
+  Serial.print(measurement.rollingAverageLevel, 6);
 
-  if (automationEnabled) {
-    updateAutomaticControl(measurement.smoothedLevel);
-  } else {
-    Serial.println(
-      F(
-        " state=DISABLED "
-        "action=none"
-      )
-    );
-  }
+  Serial.print(F(" samples="));
+  Serial.print(measurement.sampleCount);
+
+  updateAutomaticControl(measurement);
 }
